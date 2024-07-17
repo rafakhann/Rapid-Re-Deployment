@@ -113,7 +113,7 @@ object KubernetesClient {
                       case 1 =>
                         version
                       case _ =>
-                        logger.info("You entered wrong choice.")
+                        logger.info("Invalid input")
                         exit(0)
                     }
                     // Fetch build ID from Azure DevOps
