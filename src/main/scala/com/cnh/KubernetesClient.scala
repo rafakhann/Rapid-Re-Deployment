@@ -1,13 +1,10 @@
 package com.cnh
-
-
 import io.kubernetes.client.openapi.apis.{AppsV1Api, CoreV1Api}
 import io.kubernetes.client.openapi.models.{V1Deployment, V1DeploymentList, V1NamespaceList}
 import io.kubernetes.client.openapi.{ApiClient, Configuration}
 import io.kubernetes.client.util.{Config, KubeConfig}
 import org.slf4j.LoggerFactory
 import play.api.libs.json._
-
 import java.io.{FileReader, IOException}
 import java.net.URI
 import java.net.http.HttpRequest.BodyPublishers
@@ -16,6 +13,7 @@ import java.net.http.{HttpClient, HttpRequest}
 import java.util.Base64
 import scala.io.StdIn.readLine
 import scala.jdk.CollectionConverters._
+import scala.sys.exit
 
 object KubernetesClient {
 
@@ -48,10 +46,12 @@ object KubernetesClient {
     )
 
     // Take user input for environment
-    logger.info("Enter the environment (dev, qa, stage, preprod, prod, ops): ")
-    val env = readLine().trim.toLowerCase
-
+    logger.info("\n1)dev\n2)ops\n3)prepod\n4)prod\n5)qa\n6)stage\nSelect anyone Environment From above List :")
+    val listOfEnv = Array("dev","ops","prepod","prod","qa","stage")
+    val selectEnv1 = readLine().trim
+    val selectEnv:Int = selectEnv1.toInt
     // Get the context for the given environment
+    val env:String = listOfEnv(selectEnv-1)
     clusterContexts.get(env) match {
       case Some(context) =>
         val client = createApiClient(context, kubeConfig)
@@ -74,15 +74,17 @@ object KubernetesClient {
       }
 
       // Zip the filtered namespaces with indices starting from 1 and print them
-      logger.info(s"Available Namespaces for $env environment:")
-      val namespacesWithIndex = filteredNamespaces.zipWithIndex.map { case (namespace, index) => (namespace, index + 1) }
-      namespacesWithIndex.foreach { case (namespace, index) =>
-        logger.info(s"$index: ${namespace.getMetadata.getName}")
-      }
 
-      // Get the user to select a namespace by index
-      logger.info("Enter the index of the namespace from the above list:")
-      val namespaceIndex: Int = readLine().toInt
+      val namespacesWithIndex = filteredNamespaces.zipWithIndex.map { case (namespace, index) => (namespace, index + 1) }
+      val namespaceString = namespacesWithIndex.map { case (namespace, index) =>
+        s"$index) ${namespace.getMetadata.getName}"
+      }.mkString("\n")
+      val selectNamespace = s"$namespaceString\nSelect anyone namespace from above list:"
+      logger.info(s"Available Namespaces for $env environment:\n"+selectNamespace)
+
+      val indexInput = readLine().trim  // Trim whitespace from the input
+      // Convert the trimmed input to an integer
+      val namespaceIndex: Int = indexInput.toInt
 
       val selectedNamespace = namespacesWithIndex.find(_._2 == namespaceIndex).map(_._1.getMetadata.getName)
       selectedNamespace match {
@@ -95,16 +97,15 @@ object KubernetesClient {
             namespace, null, null, null, null, null, null, null, null, null, false
           )
 
-          // Zip the deployments with indices starting from 1 and print them
-          logger.info(s"Deployments in the namespace $namespace:")
+          // Zip the deployments with indices starting from 1 and print the
           val deploymentsWithIndex = deploymentList.getItems.asScala.zipWithIndex.map { case (deployment, index) => (deployment, index + 1) }
-          deploymentsWithIndex.foreach { case (deployment, index) =>
-            logger.info(s"$index: ${deployment.getMetadata.getName}")
-          }
-
-          // Get the user to select a deployment by index
-          logger.info("Enter the index of the deployment from the above list:")
-          val deploymentIndex: Int = readLine().toInt
+          val deploymentsString = deploymentsWithIndex.map{ case (deployment, index) =>
+            s"$index) ${deployment.getMetadata.getName}"
+          }.mkString("\n")
+          val selectDeployment = s"$deploymentsString\nSelect anyone Deployment from above list:"
+          logger.info(s"Deployments in the namespace $namespace:\n"+selectDeployment)
+          val deployindexInput = readLine().trim
+          val deploymentIndex: Int = deployindexInput.toInt
 
           val selectedDeployment = deploymentsWithIndex.find(_._2 == deploymentIndex).map(_._1.getMetadata.getName)
           selectedDeployment match {
@@ -118,13 +119,30 @@ object KubernetesClient {
                   // Split the image string by colon to get the version part
                   val parts = image.split(":")
                   if (parts.length > 1) {
-                    val version = parts(1)
-                    logger.info(s"Container Image Version: $version")
+                    var version = parts(1)
+                    logger.info(s"Container Latest Image Version: $version")
+
+                    logger.info(s"Which Version do you want to select?\n1)Latest\n2)Specific")
+                    val selectVersion: Int =readLine().toInt
+                    selectVersion match {
+                      case 2 =>
+                        logger.info("Please enter Specific Version.\n")
+                        val specificVersion = readLine()
+                        version = specificVersion
+                      case 1 =>
+                        version
+                      case _ =>
+                        logger.info("You entered wrong choice.")
+                        exit(0)
+                    }
+
                     // Fetch build ID from Azure DevOps
-                    val buildId = fetchBuildIdFromAzure("20240627.1")
+                    logger.info("Enter your Personal Access Token:")
+                    val personalAccessToken: String = readLine()
+                    val buildId = fetchBuildIdFromAzure(version,personalAccessToken)
                     logger.info(s"Build ID: $buildId")
                     // Rerun the deploy stage
-                    val rerunResult = rerunDeployStage(buildId)
+                    val rerunResult = rerunDeployStage(buildId,personalAccessToken)
                     logger.info(s"Rerun Deploy Stage Result: $rerunResult")
                   } else {
                     logger.warn("No version found in image tag.")
@@ -145,11 +163,10 @@ object KubernetesClient {
     }
   }
 
-  def fetchBuildIdFromAzure(version: String): String = {
+  def fetchBuildIdFromAzure(version: String,personalAccessToken:String): String = {
     val organization = "https://dev.azure.com/cnhi"
     val project = "GeoSpatialStorage"
-    logger.info("Enter your Personal Access Token:")
-    val personalAccessToken: String = readLine()
+
 
     val url = s"$organization/$project/_apis/build/builds?api-version=6.0&queryOrder=finishTimeDescending&buildNumber=$version"
 
@@ -166,15 +183,15 @@ object KubernetesClient {
       val json = Json.parse(response.body())
       (json \ "value").as[JsArray].value.headOption.flatMap(obj => (obj \ "id").asOpt[Int]).map(_.toString).getOrElse("Build ID not found")
     } else {
-      s"Failed to fetch build ID: ${response.statusCode()}. Response body: ${response.body()}"
+      val errorMessage = s"Failed to fetch build ID: ${response.statusCode()}. Response body: ${response.body()}"
+      logger.error(errorMessage)
+      exit() // Exit the system with a non-zero status code
     }
   }
 
-  def rerunDeployStage(buildId: String): String = {
+  def rerunDeployStage(buildId: String,personalAccessToken:String): String = {
     val organization = "https://dev.azure.com/cnhi"
     val project = "GeoSpatialStorage"
-    logger.info("Enter your Personal Access Token:")
-    val personalAccessToken: String = readLine()
 
     val url = s"$organization/$project/_apis/build/builds/$buildId/stages/Deploy?api-version=6.0-preview.1"
 
@@ -201,4 +218,3 @@ object KubernetesClient {
     }
   }
 }
-
